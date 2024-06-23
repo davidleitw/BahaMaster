@@ -1,12 +1,9 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
 
 	"github.com/davidleitw/baha/internal/craw"
-	"github.com/davidleitw/baha/internal/db"
 	"github.com/joho/godotenv"
 	"github.com/sirupsen/logrus"
 )
@@ -16,17 +13,6 @@ func init() {
 		FullTimestamp: true,
 	})
 	logrus.SetReportCaller(true)
-}
-
-func printEachPageInfo(buildingRecord *db.BuildingRecord) {
-	for _, pageRecord := range buildingRecord.Pages {
-		prettyJsonStr, err := json.MarshalIndent(pageRecord, "", "  ")
-		if err != nil {
-			logrus.WithError(err).Error("json.MarshalIndent error")
-			return
-		}
-		fmt.Printf("%s\n", prettyJsonStr)
-	}
 }
 
 func main() {
@@ -43,13 +29,14 @@ func main() {
 		return
 	}
 
-	crawler.LoadAuthCookies(account, password)
+	if err := crawler.LoginAndKeepCookies(account, password); err != nil {
+		logrus.WithError(err).Error("LoginAndKeepCookies error")
+		return
+	}
 
 	url := "https://forum.gamer.com.tw/C.php?bsn=60076&snA=8294384&tnum=4"
-	buildingRecord, err := crawler.ScrapingBuildingWithUrl(url)
-	if err != nil {
+	if err := crawler.ScrapingBuildingWithUrl(url); err != nil {
 		logrus.WithError(err).Error("ScrapingBuilding error")
 		return
 	}
-	printEachPageInfo(buildingRecord)
 }

@@ -14,19 +14,17 @@ type FloorRecord struct {
 	Pid string `json:"pid"`
 	Fid string `json:"fid"`
 
-	FloorIndex int    `json:"floor_index"`
+	FloorIndex int `json:"floor_index"`
+
 	AuthorName string `json:"author_name"`
 	AuthorId   string `json:"author_id"`
 	Content    string `json:"content"`
-
-	Messages []*ReplyRecord `json:"messages"`
 }
 
 type PageRecord struct {
-	Bid string `json:"bid"`
-	Pid string `json:"pid"`
-
-	FloorRecords []*FloorRecord `json:"floor_records"`
+	Bid       string `json:"bid"`
+	Pid       string `json:"pid"`
+	PageIndex int    `json:"page_index"`
 }
 
 type BuildingRecord struct {
@@ -36,9 +34,5 @@ type BuildingRecord struct {
 	Sna int `json:"sna"`
 
 	BuildingTitle string `json:"building_title"`
-
-	PosterFloor *FloorRecord `json:"poster_floor"`
-
-	LastPageIndex int           `json:"last_page_index"`
-	Pages         []*PageRecord `json:"pages"`
+	LastPageIndex int    `json:"last_page_index"`
 }
