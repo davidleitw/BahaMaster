@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/davidleitw/baha/internal/craw"
@@ -34,9 +35,18 @@ func main() {
 		return
 	}
 
-	url := "https://forum.gamer.com.tw/C.php?bsn=60076&snA=8294384&tnum=4"
-	if err := crawler.ScrapingBuildingWithUrl(url); err != nil {
-		logrus.WithError(err).Error("ScrapingBuilding error")
+	url := "https://forum.gamer.com.tw/C.php?bsn=60076&snA=3146926&last=1#down"
+	pageRecord, err := crawler.ParsePage(url)
+	if err != nil {
+		logrus.WithError(err).Error("ParsePage error")
 		return
+	}
+	logrus.Info("size of floors: ", len(pageRecord.Floors))
+	for _, floor := range pageRecord.Floors {
+		fmt.Printf("Index = %d, Author: %s, Content: %s\n", floor.FloorIndex, floor.AuthorName, floor.Content)
+		for _, reply := range floor.Replies {
+			fmt.Printf(" > Reply: %s\n", reply.Content)
+		}
+		fmt.Println()
 	}
 }

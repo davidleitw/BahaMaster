@@ -2,12 +2,10 @@ package craw
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -16,7 +14,6 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/davidleitw/baha/internal/db"
 	"github.com/go-resty/resty/v2"
-	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -39,73 +36,10 @@ const (
 	scrapingInterval = 1 * time.Second
 )
 
-type TargetInfo struct {
-	Bsn  int
-	Sna  int
-	Page int
-}
-
-func (targetInfo *TargetInfo) validate() error {
-	if targetInfo == nil {
-		return fmt.Errorf("targetInfo is nil")
-	}
-
-	if targetInfo.Bsn <= 0 || targetInfo.Sna <= 0 {
-		return fmt.Errorf("targetInfo is invalid")
-	}
-
-	return nil
-}
-
-func (targetInfo TargetInfo) GetBuildingUrl() string {
-	return fmt.Sprintf("%sbsn=%d&snA=%d", BahaBaseUrl, targetInfo.Bsn, targetInfo.Sna)
-}
-
-func (targetInfo TargetInfo) GetPageUrl(page int) string {
-	return fmt.Sprintf("%sbsn=%d&snA=%d&page=%d", BahaBaseUrl, targetInfo.Bsn, targetInfo.Sna, page)
-}
-
-func GetTargetInfoFromUrl(rawURL string) (*TargetInfo, error) {
-	parsedURL, err := url.Parse(rawURL)
-	if err != nil {
-		logrus.WithError(err).Error("url.Parse failed")
-		return nil, err
-	}
-
-	targetInfo := &TargetInfo{}
-	params := parsedURL.Query()
-	if bsns := params.Get("bsn"); bsns != "" {
-		bsn, err := strconv.Atoi(params.Get("bsn"))
-		if err != nil {
-			logrus.WithError(err).Error("strconv.Atoi failed")
-			return nil, err
-		}
-		targetInfo.Bsn = bsn
-	}
-
-	if snas := params.Get("snA"); snas != "" {
-		sna, err := strconv.Atoi(params.Get("snA"))
-		if err != nil {
-			logrus.WithError(err).Error("strconv.Atoi failed")
-			return nil, err
-		}
-		targetInfo.Sna = sna
-	}
-	return targetInfo, nil
-}
-
 type Crawler interface {
-	getDocumentFromUrl(url string) (*goquery.Document, error)
-
-	GetBuildingPageAndTitle(targetInfo *TargetInfo) (int, string, error)
-
-	scrapingPage(pageUrl string, pageIndex int, buildingId string) error
-
-	ScrapingBuilding(targetInfo *TargetInfo) error
-
-	ScrapingBuildingWithUrl(url string) error
-
 	LoginAndKeepCookies(account, password string) error
+
+	ParsePage(url string) (*db.PageRecord, error)
 }
 
 type crawler struct {
@@ -200,32 +134,33 @@ func extractExtendAPIParams(onclickValue string) (int, int, error) {
 	return num1, num2, nil
 }
 
-func (crawler *crawler) syncRepliesExtended(s *goquery.Selection, fid string) error {
-	onclickValue, exist := s.Find("div.nocontent>a,more-reply").Attr("onclick")
+func (crawler *crawler) parseReplyMessageExtended(selection *goquery.Selection) ([]*db.ReplyRecord, error) {
+	onclickValue, exist := selection.Find("div.nocontent>a.more-reply").Attr("onclick")
 	if !exist {
-		logrus.Errorf("extendSection.Find a.more-reply id not found")
-		return nil
+		logrus.Errorf("extendSelection.Find a.more-reply id not found")
+		return nil, nil
 	}
 
 	bsn, snb, err := extractExtendAPIParams(onclickValue)
 	if err != nil {
 		logrus.WithError(err).Errorf("getExtendRequestId failed")
-		return err
+		return nil, err
 	}
 
 	extendUrl := fmt.Sprintf("%sbsn=%d&snB=%d&returnHtml=0", ExtendReplyURL, bsn, snb)
 	res, err := crawler.client.R().Get(extendUrl)
 	if err != nil {
 		logrus.WithError(err).Errorf("GET %s failed", extendUrl)
-		return err
+		return nil, err
 	}
 
 	replyRes := map[string]interface{}{}
 	if err := json.Unmarshal(res.Body(), &replyRes); err != nil {
 		logrus.WithError(err).Error("Failed to unmarshal JSON")
-		return err
+		return nil, err
 	}
 
+	replies := make([]*db.ReplyRecord, 0)
 	for index, reply := range replyRes {
 		if index == "next_snC" {
 			continue
@@ -239,248 +174,108 @@ func (crawler *crawler) syncRepliesExtended(s *goquery.Selection, fid string) er
 		switch r := reply.(type) {
 		case map[string]interface{}:
 			record := &db.ReplyRecord{
-				Fid:        fid,
 				ReplyIndex: replyIndex,
 				AuthorName: r["nick"].(string),
 				AuthorId:   r["userid"].(string),
 				Content:    r["comment"].(string),
 			}
-			if err := crawler.db.SyncReplyRecord(record); err != nil {
-				logrus.WithError(err).Error("crawler.db.SyncReplyRecord failed")
-			}
+			replies = append(replies, record)
 		default:
 			logrus.Errorf("Unexpected type: %T", r)
 		}
 	}
-	return nil
+	return replies, nil
 }
 
-func (crawler *crawler) syncReplies(s *goquery.Selection, fid string) error {
-	s.Find("div.c-reply__item>div>div.reply-content").Each(func(i int, s *goquery.Selection) {
-		contentUserSection := s.Find("a.reply-content__user")
-		name := contentUserSection.Text()
-		id, exist := contentUserSection.Attr("href")
+func (crawler *crawler) parseReplyMessage(selection *goquery.Selection) ([]*db.ReplyRecord, error) {
+	if selection.Find("div.nocontent").Length() != 0 {
+		return crawler.parseReplyMessageExtended(selection)
+	}
+
+	records := make([]*db.ReplyRecord, 0)
+	selection.Find("div.c-reply__item>div>div.reply-content").Each(func(i int, s *goquery.Selection) {
+		contentUserSelection := s.Find("a.reply-content__user")
+		name := contentUserSelection.Text()
+		id, exist := contentUserSelection.Attr("href")
 		if !exist {
-			logrus.Errorf("contentUserSection.Attr href not found")
+			logrus.Errorf("contentUserSelection.Attr href not found")
 			return
 		}
 
 		record := &db.ReplyRecord{
-			Fid:        fid,
 			ReplyIndex: i,
 			AuthorName: name,
 			AuthorId:   getAuthorIdFromHref(id),
 			Content:    s.Find("article.c-article>span.comment_content").Text(),
 		}
-
-		if err := crawler.db.SyncReplyRecord(record); err != nil {
-			logrus.WithError(err).Error("crawler.db.SyncReplyRecord failed")
-		}
+		records = append(records, record)
 	})
-	return nil
+	return records, nil
 }
 
-func (crawler *crawler) syncFloorRecord(bid, pid, authName, authId, content string, floorIndex int) (string, error) {
-	var err error
-	var floorRecord *db.FloorRecord
-
-	floorRecord, err = crawler.db.GetFloorRecord(bid, floorIndex)
-	if err != nil {
-		if err != sql.ErrNoRows {
-			logrus.WithError(err).Error("crawler.db.GetFloorRecord failed")
-			return "", err
-		}
-		floorRecord = &db.FloorRecord{
-			Bid:        bid,
-			Pid:        pid,
-			Fid:        uuid.New().String(),
-			AuthorName: authName,
-			AuthorId:   authId,
-			Content:    content,
-			FloorIndex: floorIndex,
-		}
-
-		if err = crawler.db.CreateFloorRecord(floorRecord); err != nil {
-			logrus.WithError(err).Error("crawler.db.CreateFloorRecord failed")
-			return "", err
-		}
-		return floorRecord.Fid, nil
+func (crawler *crawler) parseFloor(selection *goquery.Selection) (*db.FloorRecord, error) {
+	record := &db.FloorRecord{
+		Replies: make([]*db.ReplyRecord, 0),
 	}
 
-	if floorRecord.Content != content {
-		if err = crawler.db.UpdateFloorRecordContent(floorRecord.Fid, content); err != nil {
-			logrus.WithError(err).Error("crawler.db.UpdateFloorRecordContent failed")
-			return "", err
-		}
+	if disableFloor, exist := selection.Attr("id"); !exist || strings.Contains(disableFloor, "disable") {
+		return nil, nil
 	}
 
-	return floorRecord.Fid, nil
-}
-
-func (crawler *crawler) parseFloorSelection(s *goquery.Selection, bid, pid string) error {
-	// get floor id, if it contains "disable" then it's not a valid floor
-	disableFloor, exist := s.Attr("id")
-	if !exist || strings.Contains(disableFloor, "disable") {
-		return nil
-	}
-
-	mainSection := s.Find("div.c-section__main")
-
-	authorSection := mainSection.Find("div.c-post__header__author")
-	floorIndex, exist := authorSection.Find("a.floor").Attr("data-floor")
+	mainSelection := selection.Find("div.c-section__main")
+	authorSelection := mainSelection.Find("div.c-post__header__author")
+	floorIndex, exist := authorSelection.Find("a.floor").Attr("data-floor")
 	if !exist {
-		logrus.Errorf("authorSection.Find a.floor data-floor not found")
-		return errors.New("floorIndex not found")
+		logrus.Errorf("authorSelection.Find a.floor data-floor not found")
+		return nil, errors.New("floorIndex not found")
 	}
 
 	index, err := strconv.Atoi(floorIndex)
 	if err != nil {
 		logrus.WithError(err).Errorf("strconv.Atoi %s failed", floorIndex)
-		return err
+		return nil, err
 	}
 
-	authorName := authorSection.Find("a.username").Text()
-	authorId := authorSection.Find("a.userid").Text()
+	record.AuthorName = authorSelection.Find("a.username").Text()
+	record.AuthorId = authorSelection.Find("a.userid").Text()
+	record.FloorIndex = index
 
-	content, err := mainSection.Find("div.c-article__content").Html()
+	content, err := mainSelection.Find("div.c-article__content").Html()
 	if err != nil {
-		logrus.WithError(err).Errorf("mainSection.Find div.c-article__content failed")
-		return errors.New("content not found")
+		logrus.WithError(err).Errorf("mainSelection.Find div.c-article__content failed")
+		return nil, errors.New("content not found")
 	}
+	record.Content = content
 
-	fid, err := crawler.syncFloorRecord(bid, pid, authorName, authorId, content, index)
+	replies, err := crawler.parseReplyMessage(mainSelection.Find("div.c-reply"))
 	if err != nil {
-		logrus.WithError(err).Error("crawler.syncFloorRecord failed")
-		return err
+		logrus.WithError(err).Error("crawler.parseReplyMessage failed")
+		return nil, err
 	}
-
-	replyContentSection := mainSection.Find("div.c-reply")
-	// If there are more replies, we need to send another request to get the full content
-	if replyContentSection.Find("div.nocontent").Length() != 0 {
-		return crawler.syncRepliesExtended(replyContentSection, fid)
-	}
-	return crawler.syncReplies(replyContentSection, fid)
+	record.Replies = replies
+	return record, nil
 }
 
-func (crawler *crawler) getPageRecord(buildingId string, pageIndex int) (*db.PageRecord, error) {
-	var err error
-	var pageRecord *db.PageRecord
-
-	pageRecord, err = crawler.db.GetPageRecord(buildingId, pageIndex)
-	if err != nil {
-		if err != sql.ErrNoRows {
-			logrus.WithError(err).Error("crawler.db.GetPageRecord failed")
-			return nil, err
-		}
-
-		pageRecord = &db.PageRecord{
-			Pid:       uuid.New().String(),
-			Bid:       buildingId,
-			PageIndex: pageIndex,
-		}
-
-		if err = crawler.db.CreatePageRecord(pageRecord); err != nil {
-			logrus.WithError(err).Error("crawler.db.CreatePageRecord failed")
-			return nil, err
-		}
+func (crawler *crawler) ParsePage(url string) (*db.PageRecord, error) {
+	record := &db.PageRecord{
+		Floors: make([]*db.FloorRecord, 0),
 	}
 
-	return pageRecord, nil
-}
-
-func (crawler *crawler) scrapingPage(pageUrl string, pageIndex int, buildingId string) error {
-	doc, err := crawler.getDocumentFromUrl(pageUrl)
+	doc, err := crawler.getDocumentFromUrl(url)
 	if err != nil {
 		logrus.WithError(err).Error("crawler.getDocumentFromUrl failed")
-		return err
-	}
-
-	pageRecord, err := crawler.getPageRecord(buildingId, pageIndex)
-	if err != nil {
-		logrus.WithError(err).Error("crawler.getPageRecord failed")
-		return err
+		return record, err
 	}
 
 	doc.Find("section.c-section[id]").Each(func(i int, s *goquery.Selection) {
-		if err := crawler.parseFloorSelection(s, buildingId, pageRecord.Pid); err != nil {
-			logrus.WithError(err).Error("crawler.parseFloorSelection failed")
+		floorRecord, err := crawler.parseFloor(s)
+		if floorRecord == nil || err != nil {
 			return
 		}
+		record.Floors = append(record.Floors, floorRecord)
 	})
 
-	return nil
-}
-
-func (crawler *crawler) getBuildingRecord(targetInfo *TargetInfo, lastPageIndex int, title string) (string, error) {
-	var err error
-	var buildingRecord *db.BuildingRecord
-
-	buildingRecord, err = crawler.db.GetBuildingRecord(targetInfo.Bsn, targetInfo.Sna)
-	if err != nil {
-		if err != sql.ErrNoRows {
-			logrus.WithError(err).Error("crawler.db.GetBuildingRecord failed")
-			return "", err
-		}
-
-		buildingRecord = &db.BuildingRecord{
-			Id:            uuid.New().String(),
-			Bsn:           targetInfo.Bsn,
-			Sna:           targetInfo.Sna,
-			BuildingTitle: title,
-			LastPageIndex: lastPageIndex,
-		}
-		if err = crawler.db.CreateBuildingRecord(buildingRecord); err != nil {
-			logrus.WithError(err).Error("crawler.db.CreateBuildingRecord failed")
-			return "", err
-		}
-		return buildingRecord.Id, nil
-	}
-
-	if buildingRecord.BuildingTitle != title || buildingRecord.LastPageIndex != lastPageIndex {
-		if err = crawler.db.UpdateBuildingRecord(buildingRecord); err != nil {
-			logrus.WithError(err).Error("crawler.db.UpdateBuildingRecord failed")
-			return "", err
-		}
-	}
-	return buildingRecord.Id, nil
-}
-
-func (crawler *crawler) ScrapingBuilding(targetInfo *TargetInfo) error {
-	if err := targetInfo.validate(); err != nil {
-		logrus.WithError(err).Error("targetInfo.validate failed")
-		return err
-	}
-
-	lastPageIndex, title, err := crawler.GetBuildingPageAndTitle(targetInfo)
-	if err != nil {
-		logrus.WithError(err).Error("crawler.GetBuildingPageAndTitle failed")
-		return err
-	}
-
-	id, err := crawler.getBuildingRecord(targetInfo, lastPageIndex, title)
-	if err != nil {
-		logrus.WithError(err).Error("crawler.getBuildingRecord failed")
-		return err
-	}
-
-	for pageIndex := 1; pageIndex <= lastPageIndex; pageIndex++ {
-		pageUrl := targetInfo.GetPageUrl(pageIndex)
-		if err := crawler.scrapingPage(pageUrl, pageIndex, id); err != nil {
-			logrus.WithError(err).Error("crawler.scrapingPage failed")
-			return err
-		}
-		time.Sleep(scrapingInterval)
-	}
-	return nil
-}
-
-func (crawler *crawler) ScrapingBuildingWithUrl(url string) error {
-	targetInfo, err := GetTargetInfoFromUrl(url)
-	if err != nil {
-		logrus.WithError(err).Error("GetTargetInfoFromUrl failed")
-		return err
-	}
-	return crawler.ScrapingBuilding(targetInfo)
+	return record, nil
 }
 
 func getAlternativeCaptcha(response *resty.Response) string {
