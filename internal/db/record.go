@@ -19,12 +19,16 @@ type FloorRecord struct {
 	AuthorName string `json:"author_name"`
 	AuthorId   string `json:"author_id"`
 	Content    string `json:"content"`
+
+	Replies []*ReplyRecord
 }
 
 type PageRecord struct {
 	Bid       string `json:"bid"`
 	Pid       string `json:"pid"`
 	PageIndex int    `json:"page_index"`
+
+	Floors []*FloorRecord
 }
 
 type BuildingRecord struct {

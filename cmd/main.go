@@ -35,7 +35,7 @@ func main() {
 		return
 	}
 
-	url := "https://forum.gamer.com.tw/C.php?bsn=60076&snA=3146926&last=1#down"
+	url := "https://forum.gamer.com.tw/C.php?page=38935&bsn=60076&snA=5170434"
 	pageRecord, err := crawler.ParsePage(url)
 	if err != nil {
 		logrus.WithError(err).Error("ParsePage error")
