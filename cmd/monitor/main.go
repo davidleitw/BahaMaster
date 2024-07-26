@@ -21,6 +21,15 @@ func init() {
 	logrus.SetReportCaller(true)
 }
 
+func newTrackRule(Id string) *rule.TrackingRule {
+	return rule.NewTrackingRule(
+		rule.Bsn(60076),
+		rule.Sna(CsBuildingNo),
+		rule.Id(Id),
+		rule.PokeInterval(10*time.Second),
+	)
+}
+
 func main() {
 	if err := godotenv.Load(); err != nil {
 		logrus.Fatalf("Error loading .env file: %v", err)
@@ -29,14 +38,14 @@ func main() {
 	account := os.Getenv("ACCOUNT")
 	password := os.Getenv("PASSWORD")
 
+	rules := []*rule.TrackingRule{
+		newTrackRule("leichitw"),
+	}
+
 	monitor, err := monitor.NewMonitor(
-		account, password,
-		rule.NewTrackingRule(
-			rule.Bsn(60076),
-			rule.Sna(CsBuildingNo),
-			rule.Id("leichitw"),
-			rule.PokeInterval(10*time.Second),
-		),
+		account,
+		password,
+		rules...,
 	)
 	if err != nil {
 		logrus.WithError(err).Error("monitor.NewMonitor failed")
@@ -44,6 +53,6 @@ func main() {
 	}
 
 	if err := monitor.Run(); err != nil {
-		logrus.WithError(err).Error("snopper.Run failed")
+		logrus.WithError(err).Error("monitor.Run failed")
 	}
 }
